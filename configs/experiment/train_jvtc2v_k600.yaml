@@ -1,0 +1,20 @@
+# @package _global_
+defaults:
+  - override /dataset: kinetics600
+  - override /algorithm: dit_c2video
+  - override /algorithm/backbone: jvt_c2v
+
+name: jvtc2v_k600_16f_4fps_t4
+algorithm:
+  temporal_downsampling_factor: 4
+  noise_sampling:
+    shift: 4
+trainer:
+  data:
+    batch_size: 32
+    num_workers: 4
+  # Stop by optimizer updates, independently of the number of videos in an epoch.
+  max_steps: 400000
+  max_epoches: 1000000
+  lr_scheduler:
+    num_training_steps: 400000

@@ -27,6 +27,7 @@ data:
 precision: 16-mixed
 max_epoches: 22
 max_steps: -1
+max_run_seconds: 0  # 0 disables the clean wall-time stop
 save_freq: 2
 save_last_freq: 1
 

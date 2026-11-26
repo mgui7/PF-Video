@@ -128,6 +128,9 @@ python evaluation/infer_camctrl.py \
 
 ## 🔥 Training
 
+For the local Kinetics-600 setup (16 frames, 4 fps, 256px), including multi-node
+launching and GPU batch-size profiling, see [K600 training](docs/k600_training.md).
+
 Our full-scale training needs 8 NVIDIA 80GB GPUs, with the following scripts:
 
 ```bash

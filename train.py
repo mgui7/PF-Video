@@ -29,6 +29,7 @@ from utils.checkpoint_utils import (  # noqa: E402
 )
 from utils.ema import EMAOptimizer  # noqa: E402
 from utils.logger import MetricLogger, SmoothedValue  # noqa: E402
+from utils.training_runtime import TrainingDeadline  # noqa: E402
 
 def save_grad_norms(norms_dict, global_step, save_dir, top_k=5):
     if not is_main_process():
@@ -98,7 +99,7 @@ def grad_norm(module: torch.nn.Module, norm_type: Union[float, int, str], group_
     return norms
 
 
-def train_one_epoch(model, data_loader, optimizer, lr_scheduler, device, epoch, global_step, log_writer, cfg):
+def train_one_epoch(model, data_loader, optimizer, lr_scheduler, device, epoch, global_step, log_writer, cfg, deadline=None):
     model.train()
     metric_logger = MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -212,6 +213,9 @@ def train_one_epoch(model, data_loader, optimizer, lr_scheduler, device, epoch, 
         global_step += 1
         if max_steps > 0 and global_step >= max_steps:
             break
+        if deadline is not None and deadline.should_stop(global_step, device):
+            print(f'Allocation time budget reached at update {global_step}; saving before exit.')
+            break
 
     if pending_loss_reduce is not None:
         loss_value_reduce_tensor, loss_reduce_handle, epoch_1000x = pending_loss_reduce
@@ -271,6 +275,7 @@ def print_cfg(cfg: DictConfig, overrides: List[str]):
         f.write(OmegaConf.to_yaml(cfg))
 
 def main(cfg: DictConfig, overrides: List[str]):
+    run_started = time.monotonic()
     # runtime infra config
     OmegaConf.set_struct(cfg, False)
     init_distributed_mode(cfg.infra)
@@ -300,7 +305,10 @@ def main(cfg: DictConfig, overrides: List[str]):
     else:
         log_writer = None
 
-    if cfg.dataset.name == "realestate10k":
+    if cfg.dataset.name == "kinetics600":
+        from dataset.kinetics600 import Kinetics600VideoDataset
+        dataset_train = Kinetics600VideoDataset(cfg=cfg.dataset, current_epoch=0)
+    elif cfg.dataset.name == "realestate10k":
         from dataset.re10k import RealEstate10KVideoDataset
         dataset_train = RealEstate10KVideoDataset(cfg=cfg.dataset, current_epoch=0)
     elif cfg.dataset.name == "ucf101":
@@ -437,17 +445,19 @@ def main(cfg: DictConfig, overrides: List[str]):
     # Training loop
     print(f"Start training for {trainer_cfg.max_epoches} epochs")
     start_time = time.time()
+    deadline = TrainingDeadline(float(trainer_cfg.get('max_run_seconds', 0)), started_at=run_started)
 
     for epoch in range(start_epoch, trainer_cfg.max_epoches):
         if infra_cfg.distributed:
             data_loader_train.sampler.set_epoch(epoch)
 
         dataset_train.set_epoch(epoch)
-        global_step = train_one_epoch(model, data_loader_train, optimizer, lr_scheduler, device, epoch, global_step, log_writer, cfg)
+        global_step = train_one_epoch(model, data_loader_train, optimizer, lr_scheduler, device, epoch, global_step, log_writer, cfg, deadline)
+        reached_target = trainer_cfg.max_steps > 0 and global_step >= trainer_cfg.max_steps
 
         # Save checkpoint periodically
         if not bool(trainer_cfg.get("disable_checkpoint", False)):
-            if epoch % trainer_cfg.save_last_freq == 0 or epoch + 1 == trainer_cfg.max_epoches:
+            if deadline.stopped or reached_target or epoch % trainer_cfg.save_last_freq == 0 or epoch + 1 == trainer_cfg.max_epoches:
                 save_model(
                     cfg=cfg, model_without_ddp=model_without_ddp,
                     optimizer=optimizer, lr_scheduler=lr_scheduler,
@@ -477,6 +487,8 @@ def main(cfg: DictConfig, overrides: List[str]):
 
         if trainer_cfg.max_steps > 0 and global_step >= trainer_cfg.max_steps:
             print(f"Reached max_steps={trainer_cfg.max_steps}; stopping training.")
+            break
+        if deadline.stopped:
             break
 
     total_time = time.time() - start_time
